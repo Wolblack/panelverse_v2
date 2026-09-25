@@ -18,6 +18,7 @@ from aiogram.utils.deep_linking import create_start_link
 from pypdf import PdfReader
 
 from config import BOT_TOKEN, ADMIN_IDS
+from web_admin import start_web_admin, stop_web_admin
 
 from database import (
     init_db,
@@ -2933,12 +2934,16 @@ async def main():
         )
 
     init_db()
+    web_runner = await start_web_admin(bot)
 
     logging.info(
         "PanelVerse is running."
     )
 
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await stop_web_admin()
 
 
 if __name__ == "__main__":
