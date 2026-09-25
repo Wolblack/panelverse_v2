@@ -27,3 +27,21 @@ if not ADMIN_IDS:
         "ADMIN_IDS is missing. Add your Telegram user ID(s) "
         "to the .env file."
     )
+
+
+# ============================================================
+# WEB ADMIN / UNIFIED ARCHIVE
+# ============================================================
+
+ADMIN_WEB = os.getenv("ADMIN_WEB", "1").strip()
+ADMIN_WEB_HOST = os.getenv("ADMIN_WEB_HOST", "127.0.0.1").strip()
+ADMIN_WEB_PORT = int(os.getenv("ADMIN_WEB_PORT", "8080"))
+ADMIN_WEB_TOKEN = os.getenv("ADMIN_WEB_TOKEN", "").strip()
+ADMIN_WEB_PUBLIC_URL = os.getenv(
+    "ADMIN_WEB_PUBLIC_URL",
+    f"http://{ADMIN_WEB_HOST}:{ADMIN_WEB_PORT}/admin"
+).strip()
+
+ARCHIVE_STORAGE_DIR = os.getenv("ARCHIVE_STORAGE_DIR", "archive_storage").strip()
+ARCHIVE_MAX_FILE_MB = int(os.getenv("ARCHIVE_MAX_FILE_MB", "4096"))
+TELEGRAM_PUBLISH_CHAT_ID = os.getenv("TELEGRAM_PUBLISH_CHAT_ID", "").strip()
