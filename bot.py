@@ -17,7 +17,7 @@ from aiogram.types import (
 from aiogram.utils.deep_linking import create_start_link
 from pypdf import PdfReader
 
-from config import BOT_TOKEN, ADMIN_IDS
+from config import BOT_TOKEN, ADMIN_IDS, ADMIN_WEB_PUBLIC_URL
 from web_admin import start_web_admin, stop_web_admin
 
 from database import (
@@ -258,6 +258,12 @@ def admin_keyboard():
                 InlineKeyboardButton(
                     text="🎬 Manage Media",
                     callback_data="admin_media"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🌐 Unified Web Admin",
+                    url=ADMIN_WEB_PUBLIC_URL
                 )
             ],
             [
