@@ -9,10 +9,17 @@ from pathlib import Path
 
 from aiohttp import web
 
+try:
+    from aiogram.types import FSInputFile
+except Exception:
+    FSInputFile = None
+
 from archive_service import CONTENT_TYPES, MAX_FILE_BYTES, STORAGE_DIR, create_ingestion, process_ingestion
 from database import (
     archive_audit,
     archive_create_publication_job,
+    archive_claim_publication_job,
+    archive_finish_publication_job,
     archive_get_item,
     archive_get_job,
     archive_list_items,
@@ -28,6 +35,7 @@ TELEGRAM_PUBLISH_CHAT_ID = os.getenv("TELEGRAM_PUBLISH_CHAT_ID", "").strip()
 MAX_UPLOAD = MAX_FILE_BYTES
 _tasks = set()
 _runner = None
+_publication_task = None
 
 
 def _authorized(request):
@@ -243,8 +251,51 @@ def create_app(bot=None):
     return app
 
 
+
+async def _telegram_publication_worker(bot):
+    while True:
+        try:
+            if bot and TELEGRAM_PUBLISH_CHAT_ID and FSInputFile:
+                job = archive_claim_publication_job()
+                if job:
+                    item = archive_get_item(job["item_id"])
+                    if not item or not item.get("files"):
+                        archive_finish_publication_job(job["id"], "FAILED", "Archive item has no file.")
+                        continue
+                    record = item["files"][0]
+                    path = Path(record["storage_path"])
+                    if not path.is_file():
+                        archive_finish_publication_job(job["id"], "FAILED", "Stored file is missing.")
+                        continue
+                    caption = item["title"] or "PanelVerse Archive"
+                    content_type = item["content_type"]
+                    source = FSInputFile(str(path), filename=record["original_name"])
+                    if content_type == "MUSIC" and record["mime_type"].startswith("audio/"):
+                        await bot.send_audio(TELEGRAM_PUBLISH_CHAT_ID, source, caption=caption)
+                    elif content_type in {"VIDEO", "MOVIE", "ANIME"} and record["mime_type"].startswith("video/"):
+                        await bot.send_video(TELEGRAM_PUBLISH_CHAT_ID, source, caption=caption)
+                    else:
+                        await bot.send_document(TELEGRAM_PUBLISH_CHAT_ID, source, caption=caption)
+                    archive_finish_publication_job(job["id"], "PUBLISHED")
+                    archive_update_item(job["item_id"], status="PUBLISHED", published_at=datetime.now(timezone.utc).isoformat())
+                    archive_audit("system", "TELEGRAM_PUBLICATION_COMPLETED", job["item_id"], {"job_id": job["id"]})
+                else:
+                    await asyncio.sleep(2)
+            else:
+                await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            try:
+                if 'job' in locals() and job:
+                    archive_finish_publication_job(job["id"], "FAILED", str(exc))
+                    archive_audit("system", "TELEGRAM_PUBLICATION_FAILED", job["item_id"], {"job_id": job["id"], "error": str(exc)})
+            finally:
+                await asyncio.sleep(3)
+
+
 async def start_web_admin(bot=None):
-    global _runner
+    global _runner, _publication_task
     if not ADMIN_WEB_ENABLED:
         return None
     if not ADMIN_WEB_TOKEN:
@@ -252,11 +303,19 @@ async def start_web_admin(bot=None):
     _runner = web.AppRunner(create_app(bot), access_log=None)
     await _runner.setup()
     await web.TCPSite(_runner, ADMIN_WEB_HOST, ADMIN_WEB_PORT).start()
+    _publication_task = asyncio.create_task(_telegram_publication_worker(bot))
     return _runner
 
 
 async def stop_web_admin():
-    global _runner
+    global _runner, _publication_task
+    if _publication_task:
+        _publication_task.cancel()
+        try:
+            await _publication_task
+        except asyncio.CancelledError:
+            pass
+        _publication_task = None
     if _runner:
         await _runner.cleanup()
         _runner = None
