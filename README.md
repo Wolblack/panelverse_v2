@@ -1,40 +1,53 @@
 # PanelVerse AI v2
 
-A cleaner Telegram bot MVP for PanelVerse with an inline-button menu, image recognition, library/search, recommendations, favorites, popular/latest views, and an authorized-download infrastructure.
+PanelVerse is a Telegram archive bot with a unified Web Admin ingestion and archive-control system.
+
+## Unified Archive Ingestion
+
+The Web Admin is integrated into the existing bot/database architecture. It is not a second archive or second database.
+
+Workflow: Upload -> detect content type -> extract metadata -> SHA-256 -> duplicate check -> QC -> Draft/Review/Approve/Publish -> optional Telegram publication -> audit log.
+
+Supported types: BOOK, COMIC, MANGA, ANIME, MOVIE, VIDEO, MUSIC.
+
+PDF metadata uses pypdf. EPUB and CBZ covers are extracted when present. Music metadata uses Mutagen. Large uploads are streamed through aiohttp multipart handling.
 
 ## Setup
 
-Use Python 3.11–3.13 for the smoothest compatibility.
+Use Python 3.11-3.13 for the smoothest compatibility.
 
-```bash
-cd ~/Downloads/panelverse_v2
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+    cd ~/Downloads/panelverse_v2
+    python3 -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements.txt
+    cp .env.example .env
 
-Set environment variables before running:
+Set BOT_TOKEN and ADMIN_IDS, then configure ADMIN_WEB, ADMIN_WEB_HOST, ADMIN_WEB_PORT, ADMIN_WEB_TOKEN, ADMIN_WEB_PUBLIC_URL, ARCHIVE_STORAGE_DIR and ARCHIVE_MAX_FILE_MB.
 
-```bash
-export TELEGRAM_BOT_TOKEN='YOUR_TOKEN'
-export OPENAI_API_KEY='YOUR_KEY'
-export OPENAI_MODEL='gpt-5.5'
-export ADMIN_ID='YOUR_TELEGRAM_USER_ID'
-python3 bot.py
-```
+Generate a token with: python -c "import secrets; print(secrets.token_urlsafe(32))"
 
-Do not paste secrets into chat or commit them to GitHub.
+Run: python bot.py
 
-## Download feature
+Open: http://127.0.0.1:8080/admin
 
-The bot can send a Telegram `file_id` stored in the catalog. Only add files you own, licensed, public-domain, or otherwise authorized to distribute.
+## Database
 
-## Next production upgrades
+Existing comics, chapters, media_series and media_episodes tables are preserved.
 
-- Proper admin dashboard and metadata editor
-- PostgreSQL instead of SQLite
-- Vector embeddings for better visual/title similarity
-- OCR for issue numbers and speech bubbles
-- Cover/image deduplication
-- User rate limits and abuse controls
-- Cloud deployment for 24/7 operation
+The additive ingestion layer adds archive_items, archive_files, archive_ingestion_jobs, archive_publication_jobs and archive_audit_log.
+
+## Telegram publication
+
+Set TELEGRAM_PUBLISH_CHAT_ID to an authorized channel/chat. Web publication is queued rather than blocking the browser.
+
+## Security
+
+Do not commit .env, bot tokens or admin web tokens. Uploaded filenames are reduced to safe basenames. File access is constrained to ARCHIVE_STORAGE_DIR.
+
+Only handle material you own, are licensed to archive/distribute, is public-domain, or otherwise have authorization to handle.
+
+## Verification
+
+Run: python -m compileall -q .
+Run: python -c "import database; database.init_db(); print(database.archive_stats())"
+Then start python bot.py and verify /admin -> + Add to Archive -> upload -> analysis -> QC -> review -> publish.
