@@ -4,11 +4,11 @@ from dotenv import load_dotenv
 # Load .env from the project directory
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = (os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
 
 ADMIN_IDS = {
     int(user_id.strip())
-    for user_id in os.getenv("ADMIN_IDS", "").split(",")
+    for user_id in (os.getenv("ADMIN_IDS") or os.getenv("ADMIN_ID") or "").split(",")
     if user_id.strip().isdigit()
 }
 
