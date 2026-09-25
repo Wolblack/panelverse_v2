@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 
 from aiohttp import web
@@ -114,7 +115,7 @@ async def transition_item(request):
     qc = (item.get("metadata") or {}).get("_qc") or {}
     if target in {"APPROVED", "PUBLISHED"} and qc.get("errors"):
         return _json({"error": "Critical QC errors must be resolved before publication.", "qc": qc}, 409)
-    archive_update_item(item_id, status=target, published_at=None)
+    archive_update_item(item_id, status=target, published_at=(datetime.now(timezone.utc).isoformat() if target == "PUBLISHED" else item.get("published_at")))
     archive_audit("web-admin", "ADMIN_STATUS_CHANGED", item_id, {"status": target})
     return _json(archive_get_item(item_id))
 
