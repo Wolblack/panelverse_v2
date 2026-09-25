@@ -98,6 +98,7 @@ def init_db():
             )
         """)
 
+        ensure_archive_schema(connection)
         connection.commit()
 
     except Exception:
@@ -727,5 +728,290 @@ def count_media_episodes():
             """
         ).fetchone()[0]
 
+    finally:
+        connection.close()
+
+# ============================================================
+# UNIFIED ARCHIVE INGESTION
+# ============================================================
+
+def ensure_archive_schema(connection):
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS archive_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_type TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            subtitle TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'DRAFT',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            detected_confidence INTEGER NOT NULL DEFAULT 0,
+            completeness INTEGER NOT NULL DEFAULT 0,
+            cover_path TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            legacy_kind TEXT NOT NULL DEFAULT '',
+            legacy_id INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            published_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS archive_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            original_name TEXT NOT NULL,
+            storage_path TEXT NOT NULL,
+            mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+            extension TEXT NOT NULL DEFAULT '',
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            sha256 TEXT NOT NULL DEFAULT '',
+            detected_type TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(item_id) REFERENCES archive_items(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS archive_ingestion_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'QUEUED',
+            stage TEXT NOT NULL DEFAULT 'queued',
+            progress INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(item_id) REFERENCES archive_items(id) ON DELETE SET NULL
+        );
+        CREATE TABLE IF NOT EXISTS archive_publication_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            target TEXT NOT NULL DEFAULT 'telegram',
+            status TEXT NOT NULL DEFAULT 'QUEUED',
+            error TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(item_id) REFERENCES archive_items(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS archive_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL,
+            item_id INTEGER,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(item_id) REFERENCES archive_items(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_archive_items_type_status ON archive_items(content_type, status);
+        CREATE INDEX IF NOT EXISTS idx_archive_items_title ON archive_items(title COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_archive_files_item ON archive_files(item_id);
+        CREATE INDEX IF NOT EXISTS idx_archive_files_hash ON archive_files(sha256);
+        CREATE INDEX IF NOT EXISTS idx_archive_jobs_status ON archive_ingestion_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_archive_publication_status ON archive_publication_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_archive_audit_item ON archive_audit_log(item_id);
+    """)
+
+
+def archive_create_item(content_type, title="", metadata=None, created_by="", status="DRAFT", detected_confidence=0):
+    import json
+    connection = connect()
+    try:
+        cur = connection.execute(
+            "INSERT INTO archive_items(content_type,title,status,metadata_json,created_by,detected_confidence) VALUES (?,?,?,?,?,?)",
+            (content_type, title or "", status, json.dumps(metadata or {}, ensure_ascii=False), str(created_by), int(detected_confidence or 0))
+        )
+        connection.commit()
+        return cur.lastrowid
+    finally:
+        connection.close()
+
+
+def archive_update_item(item_id, **fields):
+    import json
+    allowed = {"content_type","title","subtitle","description","status","metadata_json","detected_confidence","completeness","cover_path","legacy_kind","legacy_id","published_at"}
+    updates, values = [], []
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        if key == "metadata_json" and not isinstance(value, str):
+            value = json.dumps(value or {}, ensure_ascii=False)
+        updates.append(key + " = ?")
+        values.append(value)
+    if not updates:
+        return False
+    updates.append("updated_at = CURRENT_TIMESTAMP")
+    values.append(item_id)
+    connection = connect()
+    try:
+        cur = connection.execute("UPDATE archive_items SET " + ", ".join(updates) + " WHERE id = ?", values)
+        connection.commit()
+        return cur.rowcount > 0
+    finally:
+        connection.close()
+
+
+def archive_get_item(item_id):
+    import json
+    connection = connect()
+    try:
+        row = connection.execute("SELECT * FROM archive_items WHERE id = ?", (item_id,)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        try:
+            item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+        except Exception:
+            item["metadata"] = {}
+        item["files"] = [dict(x) for x in connection.execute("SELECT * FROM archive_files WHERE item_id = ? ORDER BY id", (item_id,)).fetchall()]
+        return item
+    finally:
+        connection.close()
+
+
+def archive_list_items(query="", content_type="", status="", limit=50, offset=0):
+    import json
+    connection = connect()
+    try:
+        where, params = [], []
+        if query:
+            where.append("(title LIKE ? OR description LIKE ? OR metadata_json LIKE ?)")
+            q = "%" + query + "%"
+            params.extend([q, q, q])
+        if content_type:
+            where.append("content_type = ?")
+            params.append(content_type)
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        rows = connection.execute(
+            "SELECT * FROM archive_items" + clause + " ORDER BY datetime(updated_at) DESC, id DESC LIMIT ? OFFSET ?",
+            params + [int(limit), int(offset)]
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+            except Exception:
+                item["metadata"] = {}
+            result.append(item)
+        return result
+    finally:
+        connection.close()
+
+
+def archive_add_file(item_id, original_name, storage_path, mime_type, extension, size_bytes, sha256, detected_type, metadata=None):
+    import json
+    connection = connect()
+    try:
+        cur = connection.execute(
+            "INSERT INTO archive_files(item_id,original_name,storage_path,mime_type,extension,size_bytes,sha256,detected_type,metadata_json) VALUES (?,?,?,?,?,?,?,?,?)",
+            (item_id, original_name, storage_path, mime_type, extension, int(size_bytes), sha256, detected_type, json.dumps(metadata or {}, ensure_ascii=False))
+        )
+        connection.commit()
+        return cur.lastrowid
+    finally:
+        connection.close()
+
+
+def archive_find_duplicate(sha256="", title="", isbn=""):
+    connection = connect()
+    try:
+        if sha256:
+            row = connection.execute(
+                "SELECT i.* FROM archive_files f JOIN archive_items i ON i.id=f.item_id WHERE f.sha256=? LIMIT 1",
+                (sha256,)
+            ).fetchone()
+            if row:
+                return dict(row), "exact_hash", 100
+        if isbn:
+            row = connection.execute("SELECT * FROM archive_items WHERE metadata_json LIKE ? LIMIT 1", ("%" + isbn + "%",)).fetchone()
+            if row:
+                return dict(row), "isbn", 100
+        if title:
+            row = connection.execute("SELECT * FROM archive_items WHERE lower(trim(title)) = lower(trim(?)) LIMIT 1", (title,)).fetchone()
+            if row:
+                return dict(row), "title", 94
+        return None
+    finally:
+        connection.close()
+
+
+def archive_create_job(item_id):
+    connection = connect()
+    try:
+        cur = connection.execute("INSERT INTO archive_ingestion_jobs(item_id) VALUES (?)", (item_id,))
+        connection.commit()
+        return cur.lastrowid
+    finally:
+        connection.close()
+
+
+def archive_update_job(job_id, status=None, stage=None, progress=None, error=None):
+    values, updates = [], []
+    if status is not None:
+        updates.append("status=?"); values.append(status)
+    if stage is not None:
+        updates.append("stage=?"); values.append(stage)
+    if progress is not None:
+        updates.append("progress=?"); values.append(max(0, min(100, int(progress))))
+    if error is not None:
+        updates.append("error=?"); values.append(error)
+    if not updates:
+        return
+    updates.append("updated_at=CURRENT_TIMESTAMP"); values.append(job_id)
+    connection = connect()
+    try:
+        connection.execute("UPDATE archive_ingestion_jobs SET " + ", ".join(updates) + " WHERE id=?", values)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def archive_get_job(job_id):
+    connection = connect()
+    try:
+        row = connection.execute("SELECT * FROM archive_ingestion_jobs WHERE id=?", (job_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        connection.close()
+
+
+def archive_create_publication_job(item_id, target="telegram"):
+    connection = connect()
+    try:
+        cur = connection.execute("INSERT INTO archive_publication_jobs(item_id,target) VALUES (?,?)", (item_id, target))
+        connection.commit()
+        return cur.lastrowid
+    finally:
+        connection.close()
+
+
+def archive_audit(actor, action, item_id=None, details=None):
+    import json
+    connection = connect()
+    try:
+        connection.execute(
+            "INSERT INTO archive_audit_log(actor,action,item_id,details_json) VALUES (?,?,?,?)",
+            (str(actor), action, item_id, json.dumps(details or {}, ensure_ascii=False))
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def archive_stats():
+    connection = connect()
+    try:
+        def count(sql):
+            return connection.execute(sql).fetchone()[0]
+        return {
+            "items": count("SELECT COUNT(*) FROM archive_items"),
+            "draft": count("SELECT COUNT(*) FROM archive_items WHERE status='DRAFT'"),
+            "review": count("SELECT COUNT(*) FROM archive_items WHERE status='REVIEW'"),
+            "published": count("SELECT COUNT(*) FROM archive_items WHERE status='PUBLISHED'"),
+            "files": count("SELECT COUNT(*) FROM archive_files"),
+            "jobs": count("SELECT COUNT(*) FROM archive_ingestion_jobs WHERE status NOT IN ('COMPLETED','FAILED')")
+        }
     finally:
         connection.close()
