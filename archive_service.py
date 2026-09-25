@@ -201,6 +201,17 @@ def extract_video(path: Path):
                 data["height"] = stream.get("height")
                 data["frame_rate"] = stream.get("r_frame_rate")
                 break
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            cover_dir = STORAGE_DIR / "covers"
+            cover_dir.mkdir(parents=True, exist_ok=True)
+            out = cover_dir / (path.stem + "-poster.jpg")
+            subprocess.run(
+                [ffmpeg, "-y", "-ss", "00:00:02", "-i", str(path), "-frames:v", "1", "-q:v", "3", str(out)],
+                capture_output=True, timeout=45, check=False
+            )
+            if out.is_file() and out.stat().st_size:
+                data["cover_path"] = str(out)
         return {k: v for k, v in data.items() if v is not None}
     except Exception as exc:
         data["analysis_error"] = str(exc)
