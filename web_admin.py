@@ -254,6 +254,7 @@ def create_app(bot=None):
 
 async def _telegram_publication_worker(bot):
     while True:
+        job = None
         try:
             if bot and TELEGRAM_PUBLISH_CHAT_ID and FSInputFile:
                 job = archive_claim_publication_job()
