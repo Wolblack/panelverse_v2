@@ -3,3 +3,4 @@ python-dotenv
 pypdf
 aiohttp>=3.11,<4
 mutagen>=1.47,<2
+pymupdf>=1.24,<2
