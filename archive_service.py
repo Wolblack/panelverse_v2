@@ -5,6 +5,7 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -29,6 +30,11 @@ try:
     from mutagen import File as MutagenFile
 except Exception:
     MutagenFile = None
+
+try:
+    import pymupdf
+except Exception:
+    pymupdf = None
 
 
 CONTENT_TYPES = {"BOOK", "COMIC", "MANGA", "ANIME", "MOVIE", "VIDEO", "MUSIC"}
@@ -98,21 +104,30 @@ def _text(meta, key):
 
 def extract_pdf(path: Path):
     data = {}
-    if not PdfReader:
-        return data
     try:
-        reader = PdfReader(str(path))
-        info = reader.metadata or {}
-        data["pages"] = len(reader.pages)
-        for source, target in (
-            ("/Title", "title"),
-            ("/Author", "authors"),
-            ("/Subject", "description"),
-            ("/Creator", "creator"),
-        ):
-            value = info.get(source)
-            if value:
-                data[target] = str(value).strip()
+        if PdfReader:
+            reader = PdfReader(str(path))
+            info = reader.metadata or {}
+            data["pages"] = len(reader.pages)
+            for source, target in (
+                ("/Title", "title"),
+                ("/Author", "authors"),
+                ("/Subject", "description"),
+                ("/Creator", "creator"),
+            ):
+                value = info.get(source)
+                if value:
+                    data[target] = str(value).strip()
+        if pymupdf:
+            doc = pymupdf.open(str(path))
+            if len(doc):
+                cover_dir = STORAGE_DIR / "covers"
+                cover_dir.mkdir(parents=True, exist_ok=True)
+                out = cover_dir / (path.stem + "-cover.png")
+                pix = doc[0].get_pixmap(dpi=110, alpha=False)
+                pix.save(str(out))
+                data["cover_path"] = str(out)
+            doc.close()
     except Exception as exc:
         data["analysis_error"] = str(exc)
     return data
@@ -164,6 +179,34 @@ def extract_epub(path: Path):
     return data
 
 
+def extract_video(path: Path):
+    data = {}
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return data
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", str(path)],
+            capture_output=True, text=True, timeout=30, check=True
+        )
+        payload = json.loads(proc.stdout or "{}")
+        fmt = payload.get("format") or {}
+        streams = payload.get("streams") or []
+        data["duration"] = float(fmt["duration"]) if fmt.get("duration") else None
+        data["bitrate"] = int(fmt["bit_rate"]) if fmt.get("bit_rate") else None
+        for stream in streams:
+            if stream.get("codec_type") == "video":
+                data["codec"] = stream.get("codec_name")
+                data["width"] = stream.get("width")
+                data["height"] = stream.get("height")
+                data["frame_rate"] = stream.get("r_frame_rate")
+                break
+        return {k: v for k, v in data.items() if v is not None}
+    except Exception as exc:
+        data["analysis_error"] = str(exc)
+        return data
+
+
 def extract_cbz(path: Path):
     data = {}
     try:
@@ -191,6 +234,7 @@ def extract_music(path: Path):
         return data
     try:
         audio = MutagenFile(str(path), easy=True)
+        raw = MutagenFile(str(path), easy=False)
         if not audio:
             return data
         mapping = {
@@ -211,6 +255,21 @@ def extract_music(path: Path):
                 data["bitrate"] = int(info.bitrate)
             if getattr(info, "sample_rate", None):
                 data["sample_rate"] = int(info.sample_rate)
+        if raw and getattr(raw, "tags", None):
+            artwork = None
+            for key, value in raw.tags.items():
+                if str(key).upper().startswith("APIC") and getattr(value, "data", None):
+                    artwork = value.data
+                    break
+                if key == "covr" and value:
+                    artwork = bytes(value[0])
+                    break
+            if artwork:
+                cover_dir = STORAGE_DIR / "covers"
+                cover_dir.mkdir(parents=True, exist_ok=True)
+                out = cover_dir / (path.stem + "-cover.jpg")
+                out.write_bytes(artwork)
+                data["cover_path"] = str(out)
     except Exception as exc:
         data["analysis_error"] = str(exc)
     return data
@@ -226,6 +285,8 @@ def extract_metadata(path: Path, detected_type: str):
         data.update(extract_cbz(path))
     elif detected_type == "MUSIC":
         data.update(extract_music(path))
+    elif detected_type in {"ANIME", "MOVIE", "VIDEO"}:
+        data.update(extract_video(path))
     return data
 
 
