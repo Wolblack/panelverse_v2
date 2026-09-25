@@ -1015,3 +1015,33 @@ def archive_stats():
         }
     finally:
         connection.close()
+
+
+def archive_claim_publication_job():
+    connection = connect()
+    try:
+        row = connection.execute(
+            "SELECT * FROM archive_publication_jobs WHERE status='QUEUED' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        connection.execute(
+            "UPDATE archive_publication_jobs SET status='PROCESSING', attempts=attempts+1, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='QUEUED'",
+            (row["id"],)
+        )
+        connection.commit()
+        return dict(row)
+    finally:
+        connection.close()
+
+
+def archive_finish_publication_job(job_id, status, error=""):
+    connection = connect()
+    try:
+        connection.execute(
+            "UPDATE archive_publication_jobs SET status=?, error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (status, error, job_id)
+        )
+        connection.commit()
+    finally:
+        connection.close()
